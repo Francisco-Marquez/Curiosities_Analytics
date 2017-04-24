@@ -1,0 +1,184 @@
+---
+title: "<CENTER>**Canal PVAE**</CENTER>"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+El presente documento contiene el detalle de los procedimientos realizados para la construcción del modelo predictivo de detección de Fraude, comercialmente llamado Fuga de Terminales, para los clientes Prepagos del canal de venta Receptivo de Telefónica del Perú. 
+
+Según los análisis previos se utilizó un corte de 25 días y el periodo de análisis fue de julio a octubre del 2016.
+
+```{r, echo=FALSE}
+suppressWarnings(suppressMessages(library(lattice))); suppressWarnings(suppressMessages(library(MASS)));   
+suppressWarnings(suppressMessages(library(caret)));   suppressWarnings(suppressMessages(library(ROCR)));  
+suppressWarnings(suppressMessages(library(catspec))); suppressWarnings(suppressMessages(library(rminer)));  
+suppressWarnings(suppressMessages(library(Hmisc)));   suppressWarnings(suppressMessages(library(ggplot2)));    
+suppressWarnings(suppressMessages(library(rpart)));   suppressWarnings(suppressMessages(library(FSelector)));
+suppressWarnings(suppressMessages(library(psych)));   suppressWarnings(suppressMessages(library(scales)));
+suppressWarnings(suppressMessages(library(RODBC)));   suppressWarnings(suppressMessages(library(data.table)));
+suppressWarnings(suppressMessages(library(ISLR)));    suppressWarnings(suppressMessages(library(ModelMetrics)));
+suppressWarnings(suppressMessages(library(dplyr)));   suppressWarnings(suppressMessages(library(randomForest)));
+suppressWarnings(suppressMessages(library(plotly)));  suppressWarnings(suppressMessages(library(Metrics)));
+suppressWarnings(suppressMessages(library(ROSE)));    suppressWarnings(suppressMessages(library(DMwR)));
+suppressWarnings(suppressMessages(library(base)));   
+
+canal= odbcConnect("Conex_SQL");
+PVAE45_c25 = sqlQuery(canal,"select ANEXO,Mes,Region,Zonal,Marca,PrimLlam,
+                             llam_sal,min_sal,llam_ent,min_ent,DifLlam,DifMin,
+                             (select case when Fuga15=0 then 'NoFuga' when Fuga15=1 then 'Fuga' end) as Fuga15,
+                             riesgo_neto_imei as riesgo_binario
+                             from [2°Proy_Detec_FdT].dbo.MDespliegue_PVAE45_c25
+                             where mes in ('Julio','Agosto','Septiembre','Octubre')"); 
+
+#Data Types:
+PVAE45_c25$Mes      =  factor(PVAE45_c25$Mes, levels=c("Julio","Agosto","Septiembre"));
+PVAE45_c25$Region   =  as.character(PVAE45_c25$Region);
+PVAE45_c25$Zonal    =  as.character(PVAE45_c25$Zonal);
+PVAE45_c25$Marca    =  as.character(PVAE45_c25$Marca);
+PVAE45_c25$PrimLlam =  as.character(PVAE45_c25$PrimLlam);
+PVAE45_c25$DifLlam  =  as.numeric(PVAE45_c25$DifLlam);
+PVAE45_c25$DifMin   =  as.numeric(PVAE45_c25$DifMin);
+PVAE45_c25$riesgo_binario = factor(PVAE45_c25$riesgo_binario, levels=c("1","0"));
+```
+
+Estructura del conjunto de datos:
+
+```{r, echo=FALSE}
+str(PVAE45_c25);
+```
+
+#----------------------- 1. TRAIN vs TEST -----------------------#
+
+```{r, echo=FALSE}
+set.seed(1111);
+n=nrow(PVAE45_c25);
+```
+
+```{r}
+indices= sample(1:n, 0.75*n, F);
+train = PVAE45_c25[ indices,];
+test  = PVAE45_c25[-indices,];
+
+Prop_Fuga_Train = round( 100*prop.table(table(train$riesgo_binario)) ,1);
+Prop_Fuga_Test  = round( 100*prop.table(table( test$riesgo_binario)) ,1);
+rbind(Prop_Fuga_Train,Prop_Fuga_Test);
+n_train = dim(train);
+n_test  = dim(test);
+rbind(n_train,n_test);
+```
+
+```{r, echo=FALSE}
+rm(PVAE45_c25,indices,n,Prop_Fuga,Prop_Fuga_Train,Prop_Fuga_Test,n_train,n_test);
+```
+
+#--------------------- 2. DATA EXPLORATION  ---------------------#
+
+```{r, echo=FALSE}
+factcols = c(1,2,3,4,5,6,13,14);
+numcols = setdiff(1:14, factcols);
+```
+
+```{r}
+#subset categorical variables
+cat_train = train[, factcols];
+#subset numerical variables
+num_train = train[, numcols];
+str(cat_train); 
+str(num_train);
+```
+
+```{r, echo=FALSE}
+rm(train,factcols,numcols);
+```
+
+
+# NUMERIC VARIABLES:
+
+GRAFICO DE CAJAS (BOXPLOT):
+```{r, echo=FALSE}
+par(mfrow=c(2,3));
+boxplot( num_train$llam_sal, main=paste('llam_sal'));
+boxplot( num_train$llam_ent, main=paste('llam_ent'));
+boxplot( num_train$DifLlam, main=paste('DifLlam'));
+boxplot( num_train$min_sal,  main=paste('min_sal'));
+boxplot( num_train$min_ent,  main=paste('min_ent'));
+boxplot( num_train$DifMin,  main=paste('DifMin'));
+```
+
+HISTOGRAMA:
+```{r, echo=FALSE}
+par(mfrow=c(2,3));
+hist( num_train$llam_sal, main=paste('llam_sal'));
+hist( num_train$llam_ent, main=paste('llam_ent'));
+hist( num_train$DifLlam, main=paste('DifLlam'));
+hist( num_train$min_sal,  main=paste('min_sal'));
+hist( num_train$min_ent,  main=paste('min_ent'));
+hist( num_train$DifMin,  main=paste('DifMin'));
+```
+
+
+## BIVARIADO:
+
+CREATE A SCATTER PLOT:
+```{r, echo=FALSE}
+#add variable objetivo to train set
+num_train = cbind(num_train, riesgo_binario = cat_train$riesgo_binario);
+
+# llam_ent VS llam_sal
+ggplot( data=num_train, aes( x=llam_sal, y=llam_ent )) + 
+  geom_point( aes( colour=riesgo_binario ));  
+#+ scale_y_continuous("llam_ent", breaks=seq(0,50,10));
+# min_ent VS min_sal
+ggplot( data=num_train, aes( x=min_sal, y=min_ent )) + 
+  geom_point( aes( colour=riesgo_binario ));
+# DifMin VS DifLlam
+ggplot( data=num_train, aes( x=DifLlam, y=DifMin )) + 
+  geom_point( aes( colour=riesgo_binario ));
+```
+
+
+## CATEGORICAL VARIABLES
+
+```{r, echo=FALSE}
+all_bar_apil <- function(i)
+{ ggplot(cat_train, aes(x=i, fill=riesgo_binario)) + geom_bar(position="stack",            color="black") + scale_fill_brewer(palette="Pastel1") +                                  theme(axis.text.x=element_text(angle=60, hjust=1, size=10)) };
+```
+
+#Cruzadas por Riesgo_Binario
+
+```{r, echo=FALSE}
+#Mes vs Riesgo_Binario
+sort( 100*round(prop.table(table(cat_train$Mes)),3) , decreasing= TRUE);
+round( 100*prop.table(table(cat_train$Mes,cat_train$riesgo_binario),1) ,0);
+all_bar_apil(cat_train$Mes);
+
+#PrimLlam vs Riesgo_Binario
+sort( 100*round(prop.table(table(cat_train$PrimLlam)),3) , decreasing= TRUE);
+round( 100*prop.table(table(cat_train$PrimLlam,cat_train$riesgo_binario),1) ,0);
+all_bar_apil(cat_train$PrimLlam);
+
+#Region vs Riesgo_Binario
+sort( 100*round(prop.table(table(cat_train$Region)),3)  , decreasing= TRUE);
+round( 100*prop.table(table(cat_train$Region,cat_train$riesgo_binario),1) ,0);
+all_bar_apil(cat_train$Region);
+
+#Zonal vs Riesgo_Binario
+sort( 100*round(prop.table(table(cat_train$Zonal)),3)   , decreasing= TRUE);
+round( 100*prop.table(table(cat_train$Zonal,cat_train$riesgo_binario),1) ,0);
+all_bar_apil(cat_train$Zonal);
+
+#Marca vs Riesgo_Binario
+sort( 100*round(prop.table(table(cat_train$Marca)),3)   , decreasing= TRUE);
+round( 100*prop.table(table(cat_train$Marca,cat_train$riesgo_binario),1) ,0);
+all_bar_apil(cat_train$Marca);
+
+#Fuga15 vs Riesgo_Binario
+sort( 100*round(prop.table(table(cat_train$Fuga15)),3)  , decreasing= TRUE);
+round( 100*prop.table(table(cat_train$Fuga15,cat_train$riesgo_binario),2) ,0);
+all_bar_apil(cat_train$Fuga15);
+
+rm(all_bar_apil);
+```
