@@ -1,2 +1,2 @@
 # Curiosities_Analytics
-Codes from process previous to modeling
+Codes from process previous to Predictive Modeling
